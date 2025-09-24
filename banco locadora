@@ -1,0 +1,144 @@
+CREATE TABLE IF NOT EXISTS Cliente (
+    cliente_id SERIAL PRIMARY KEY,
+    nome VARCHAR(100) NOT NULL,
+    cpf VARCHAR(11) UNIQUE NOT NULL,
+    email VARCHAR(100) UNIQUE NOT NULL,
+    telefone VARCHAR(15) UNIQUE NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS Veiculo (
+    veiculo_id SERIAL PRIMARY KEY,
+    placa VARCHAR(7) UNIQUE NOT NULL,
+    modelo VARCHAR(50) NOT NULL,
+    marca VARCHAR(50) NOT NULL,
+    ano INT NOT NULL,
+    cor VARCHAR(20),
+    diaria DECIMAL(10, 2) NOT NULL,
+    status VARCHAR(20) DEFAULT 'Disponível' CHECK (status IN ('Disponível', 'Alugado', 'Manutenção')),
+    tipo_cambio VARCHAR(20),
+    qtd_pessoas INT,
+    tipo_direcao VARCHAR(20)
+);
+
+CREATE TABLE IF NOT EXISTS Manutencao (
+    manutencao_id SERIAL PRIMARY KEY,
+    veiculo_id INTEGER REFERENCES Veiculo(veiculo_id),
+    data_inicio DATE NOT NULL,
+    data_fim DATE,
+    descricao TEXT
+);
+
+CREATE TABLE IF NOT EXISTS Reserva (
+    reserva_id SERIAL PRIMARY KEY,
+    cliente_id INTEGER REFERENCES Cliente(cliente_id),
+    veiculo_id INTEGER REFERENCES Veiculo(veiculo_id),
+    data_reserva DATE NOT NULL DEFAULT CURRENT_DATE,
+    valor_total DECIMAL(10, 2)
+);
+
+CREATE TABLE IF NOT EXISTS Aluguel (
+    aluguel_id SERIAL PRIMARY KEY,
+    reserva_id INTEGER UNIQUE REFERENCES Reserva(reserva_id),
+    veiculo_id INTEGER REFERENCES Veiculo(veiculo_id),
+    data_retirada TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+    data_devolucao TIMESTAMP WITH TIME ZONE,
+    valor_aluguel DECIMAL(10, 2)
+);
+
+---
+CREATE OR REPLACE FUNCTION calcular_valor_aluguel_pelo_uso(
+    p_data_retirada TIMESTAMP WITH TIME ZONE,
+    p_data_devolucao TIMESTAMP WITH TIME ZONE,
+    p_diaria DECIMAL
+)
+RETURNS DECIMAL
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_dias_uso INT;
+BEGIN
+    v_dias_uso := (EXTRACT(EPOCH FROM (p_data_devolucao - p_data_retirada)) / 86400)::INT;
+    IF v_dias_uso = 0 AND (p_data_devolucao - p_data_retirada) > INTERVAL '0 hours' THEN
+        v_dias_uso := 1;
+    END IF;
+    RETURN v_dias_uso * p_diaria;
+END;
+$$;
+
+CREATE OR REPLACE PROCEDURE registrar_aluguel(p_reserva_id INT)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_veiculo_id INT;
+BEGIN
+    SELECT veiculo_id INTO v_veiculo_id
+    FROM Reserva
+    WHERE reserva_id = p_reserva_id;
+    IF v_veiculo_id IS NULL THEN
+        RAISE EXCEPTION 'Reserva com ID % não encontrada.', p_reserva_id;
+    END IF;
+    INSERT INTO Aluguel (reserva_id, data_retirada, veiculo_id)
+    VALUES (p_reserva_id, NOW(), v_veiculo_id);
+    UPDATE Veiculo
+    SET status = 'Alugado'
+    WHERE veiculo_id = v_veiculo_id;
+END;
+$$;
+
+CREATE OR REPLACE PROCEDURE registrar_devolucao(
+    p_aluguel_id INT,
+    p_data_devolucao TIMESTAMP WITH TIME ZONE
+)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_valor_aluguel DECIMAL(10, 2);
+    v_diaria DECIMAL(10, 2);
+    v_data_retirada TIMESTAMP WITH TIME ZONE;
+    v_veiculo_id INT;
+    v_reserva_id INT;
+BEGIN
+    UPDATE Aluguel
+    SET data_devolucao = p_data_devolucao
+    WHERE aluguel_id = p_aluguel_id
+    RETURNING reserva_id, data_retirada, veiculo_id INTO v_reserva_id, v_data_retirada, v_veiculo_id;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Aluguel com ID % não encontrado.', p_aluguel_id;
+    END IF;
+    SELECT diaria INTO v_diaria FROM Veiculo WHERE veiculo_id = v_veiculo_id;
+    SELECT calcular_valor_aluguel_pelo_uso(v_data_retirada, p_data_devolucao, v_diaria) INTO v_valor_aluguel;
+    UPDATE Aluguel
+    SET valor_aluguel = v_valor_aluguel
+    WHERE aluguel_id = p_aluguel_id;
+    UPDATE Reserva
+    SET valor_total = v_valor_aluguel
+    WHERE reserva_id = v_reserva_id;
+    UPDATE Veiculo
+    SET status = 'Disponível'
+    WHERE veiculo_id = v_veiculo_id;
+    RAISE NOTICE 'Devolução registrada. Valor Total da Reserva: R$%.', v_valor_aluguel;
+END;
+$$;
+
+---
+CREATE OR REPLACE FUNCTION verificar_status_veiculo_reserva()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_status_veiculo VARCHAR(20);
+BEGIN
+    SELECT status INTO v_status_veiculo
+    FROM Veiculo
+    WHERE veiculo_id = NEW.veiculo_id;
+    IF v_status_veiculo = 'Manutenção' THEN
+        RAISE EXCEPTION 'Não é possível fazer uma reserva. O veículo está em manutenção.';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE OR REPLACE TRIGGER trg_impedir_reserva_manutencao
+BEFORE INSERT ON Reserva
+FOR EACH ROW
+EXECUTE FUNCTION verificar_status_veiculo_reserva();
