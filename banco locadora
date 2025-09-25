@@ -114,7 +114,7 @@ BEGIN
     SET valor_total = v_valor_aluguel
     WHERE reserva_id = v_reserva_id;
     UPDATE Veiculo
-    SET status = 'Disponível'
+    SET status = 'Manutencao'
     WHERE veiculo_id = v_veiculo_id;
     RAISE NOTICE 'Devolução registrada. Valor Total da Reserva: R$%.', v_valor_aluguel;
 END;
